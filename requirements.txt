@@ -1,0 +1,2 @@
+cryptography>=42
+srp>=1.0.22

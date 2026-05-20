@@ -1,0 +1,27 @@
+# Local credentials — never commit
+config.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.python-version
+
+# macOS
+.DS_Store
+
+# Build artifacts / scratch
+*.ipa
+flows.mitm
+flows.mitm.prev
+capture.jsonl
+capture.jsonl.prev
+*.har
+*.proxymansession
+
+# Editor
+.vscode/
+.idea/
+*.swp
