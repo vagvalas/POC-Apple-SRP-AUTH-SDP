@@ -501,18 +501,13 @@ specific to your account (the protocol behavior is the same regardless).
 
 ## 11. Where someone resuming this should start
 
-1. Read this file end-to-end.
-2. Check whether `auth/gsa_xcode.py`, `auth/mzfinance_auth.py`, and the
-   `tvos_download.py` script still run cleanly — Apple changes endpoint
-   contracts every few months and the SRP body shape sometimes drifts.
-3. If they do: the next concrete action is to get a working pinning-bypass
-   tweak on the Apple TV (SKS3 / NoMoreTrust / TrustMe). Section 6.3.
-4. After capture: analyze `capture.jsonl`, particularly any flow whose
-   host is `auth.itunes.apple.com` or `buy.itunes.apple.com`, especially
-   `*/authenticate` and `*/volumeStoreDownloadProduct`. Look for headers
-   we don't currently send.
-5. Based on what's in the capture, decide: replay possible from Mac, or
-   not.
+1. **Read §12 first** — that's the final wall verdict (FairPlay at `fpinit.itunes.apple.com`). Don't re-investigate the Mac-side authenticate endpoints; we've fully mapped them and they're not the path Apple TV uses.
+2. **Live TODOs** (from session 2026-05-25):
+   - Replace `lookup_app()` in `tvos_download.py` with `sp.itunes.apple.com/WebObjects/MZStorePlatform.woa/wa/lookup` (the modern, tvOS-aware metadata source from the Apple TV bag). Current code uses iTunes Search `entity=tvSoftware` which silently returns iOS data and logs the `kind='software'` warning.
+   - Optional: capture the decrypted `fpinit.itunes.apple.com` request body from the unc0ver tvOS 11.4.1 device with SKS3 narrow-filter (only `com.apple.itunesstored`, no AuthKit/UIKit — UIKit breaks SpringBoard). Proxy config goes via Apple Configurator profile since tvOS 11 Settings UI has no proxy field. Settles wire-format questions but doesn't change the verdict.
+3. **Smoke test before any change**: confirm `tvos_download.py` still runs cleanly with a fresh `config.py`. Apple drifts endpoint contracts every few months.
+4. Run the prototype, get past GSA + SPD + 2FA. If those still work the same way they did, your tooling is intact and you can proceed to the TODOs.
+5. **Never propose more Mac-only header/payload tweaks for tvOS download.** That's the trap section 12 closes. The auth wall is structural; either the work happens on a tvOS device, or tvOS is out of scope.
 
 ---
 
