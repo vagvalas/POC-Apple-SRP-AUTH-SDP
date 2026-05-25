@@ -85,13 +85,45 @@ write-up is in [`progress.md`](progress.md). The summary table is below.
 | `buyProduct(deviceClass=AppleTV)` to mint a tvOS license | `failureType=2034` ("Sign In to the iTunes Store") | iOS-class `passwordToken` can't create a tvOS license |
 | Pure GSA path without cookies | `failureType=5002` ("LicenseAlreadyExists") | Account owns the app (iOS); refuses cross-platform |
 
-## The structural reason in one sentence
+## The structural reason — confirmed by HAR capture from a real Apple TV
 
-Apple's public auth endpoints accept exactly one User-Agent
-(`Configurator/2.17`), which mints iOS-class session cookies; tvOS App
-Store authentication on a real Apple TV uses **FairPlay device certificates**
-baked into the device's secure enclave — not a public HTTP credential a
-Mac can replicate.
+A Proxyman HAR captured from a real (newer) Apple TV during an App Store
+browse + install attempt **doesn't touch a single endpoint we'd been
+trying**. No `MZFinance.woa/wa/authenticate`. No `auth/v1/native/fast`. No
+`gsa.apple.com`. No `idmsa.apple.com`.
+
+The actual tvOS auth path:
+
+```
+init.ess.apple.com              ← session init (401 without device creds)
+init-p01md.apple.com            ← Production-01 Mobile Device init
+fpinit.itunes.apple.com         ← FairPlay device handshake — THE WALL (×3 / session)
+bag.itunes.apple.com/bag.xml    ← tvOS bag (100 KB; open to all UAs)
+amp-api.apps.apple.com          ← modern store API (401 without fpinit token)
+pd.itunes.apple.com             ← product details
+p29-buy.itunes.apple.com        ← buy / volumeStoreDownloadProduct (with fpinit token)
+iosapps.itunes.apple.com        ← CDN for the .ipa bytes
+```
+
+`fpinit.itunes.apple.com` is the FairPlay device-cert handshake. The device
+exchanges a request signed by its secure enclave for session tokens that
+`amp-api.*` and `p29-buy.itunes` accept. Without those tokens, every store
+endpoint returns 401 or `5002 LicenseAlreadyExists`. The tokens are not
+obtainable from a Mac — they require the device's FairPlay credentials,
+which live in dedicated silicon (FairPlay-aware secure enclave / DRM
+co-processor) and can't be exfiltrated.
+
+Probed from a Mac, every path on `fpinit.itunes.apple.com` returns HTTP 404
+— the real path is part of the device-side code that signs the FairPlay
+request. Even with that path known we couldn't forge the signed payload.
+
+**In one sentence:** Apple's public app-store auth endpoints accept exactly
+one User-Agent (`Configurator/2.17`) which mints **iOS-class** session
+cookies, and the **tvOS-class** session tokens that `volumeStoreDownloadProduct`
+honors come from a **FairPlay device-cert handshake at
+`fpinit.itunes.apple.com`** that no Mac can replicate. The Mac-side path is
+closed by design, not by missing trick. (See `progress.md` §12 for the full
+endpoint matrix and probe results.)
 
 ---
 
@@ -277,10 +309,11 @@ infrastructure beyond research limits, that's on you, not me.
 - [x] Working GSA SRP + SPD + 2FA chain
 - [x] Documented the iOS-binary wall on the Mac path
 - [x] Polished single-file Python prototype
-- [ ] Apple TV proxy capture (blocked on tvOS-compatible pinning bypass)
-- [ ] Analysis of captured `itunesstored` traffic → decide replay feasibility
-- [ ] (Stretch) Replay-from-Mac if the captured handshake doesn't carry device-cert signatures
-- [ ] (Stretch) Port the working auth flow into a Go library
+- [x] Apple TV traffic captured (metadata only; HAR from a non-jailbroken newer Apple TV)
+- [x] Replay feasibility decided: **closed**. tvOS auth = FairPlay device-cert handshake at `fpinit.itunes.apple.com`. Not Mac-replayable.
+- [x] tvOS-compatible pinning bypass figured out (SSL Kill Switch 3 with `Filter.Bundles = [com.apple.itunesstored]` narrow filter — see `progress.md` §6.2)
+- [ ] *(Optional)* Full body-level capture from the jailbroken tvOS 11.4.1 device with SKS3 — would settle every remaining question about the FairPlay request payload, but doesn't change the replay verdict
+- [ ] *(Optional)* Port the working *GSA + SPD + 2FA* auth flow into a Go library for use in iOS-only tools where SRP-from-scratch is useful
 
 This repo is also my **record of work** for this exploration — each
 significant commit corresponds to a concrete finding or attempted

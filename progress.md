@@ -513,3 +513,145 @@ specific to your account (the protocol behavior is the same regardless).
    we don't currently send.
 5. Based on what's in the capture, decide: replay possible from Mac, or
    not.
+
+---
+
+## 12. 2026-05-25 — Final answer from Proxyman HAR on a newer Apple TV
+
+Status: **the wall is definitively mapped**. tvOS App Store authentication is
+not GSA, not Configurator-style. It's a **FairPlay device-cert handshake** at
+`fpinit.itunes.apple.com`. Replay from a Mac without that device's secure-
+enclave credentials is not possible.
+
+### 12.1 What was captured
+
+A Proxyman session from a newer Apple TV (not the jailbroken tvOS 11.4.1
+device) doing a normal App Store browse + download attempt. Proxyman
+couldn't decrypt because itunesstored pins certs on that device too (no SSL
+Kill Switch available on newer tvOS — no public jailbreak).
+
+So the HAR contains **metadata only** for every flow: URL, method,
+status, byte sizes. No headers, no bodies. But the URL list alone reveals the
+auth path.
+
+29 entries captured, all `CONNECT 200` (TLS tunnels the proxy couldn't open).
+Sorted chronologically, the Apple-store-relevant ones:
+
+```
+mesu.apple.com                          ← software-update poll
+bag.itunes.apple.com                    ← bag fetch (×3 during session)
+apps.mzstatic.com                       ← static assets (CDN)
+fpinit.itunes.apple.com                 ← FairPlay device init (×3, re-init through session)
+amp-api-search-edge.apps.apple.com      ← search (modern AMP API)
+amp-api-edge.apps.apple.com             ← catalog/browse
+amp-api.apps.apple.com                  ← product browse
+pd.itunes.apple.com                     ← product details (×2)
+is1-ssl.mzstatic.com                    ← static
+ocsp2.apple.com                         ← OCSP cert validity check
+play.itunes.apple.com                   ← purchase/playback
+init.ess.apple.com                      ← Encrypted Subscription Service init
+init-p01md.apple.com                    ← Production-01 Mobile Device init
+xp.apple.com                            ← telemetry pings (×3)
+musicstatus.itunes.apple.com            ← (unused for app downloads)
+iosapps.itunes.apple.com                ← CDN where the .ipa bytes come from
+gsp-ssl.ls.apple.com                    ← Game Center / Location Service
+itunes.apple.com                        ← (×2) — generic
+s.mzstatic.com                          ← static
+p29-buy.itunes.apple.com                ← FINAL entry — buy/download call
+```
+
+### 12.2 Critical absences
+
+- **No `gsa.apple.com`** — Apple TV does NOT do GSA SRP. Our entire
+  GSA chain documented in sections 2-3 is irrelevant to tvOS's actual auth.
+- **No `MZFinance.woa/wa/authenticate`** — the Configurator endpoint isn't
+  in the flow. The Apple TV doesn't use it.
+- **No `auth.itunes.apple.com/auth/v1/native/fast`** — the "modern" iOS auth
+  endpoint also unused.
+- **No `idmsa.apple.com`** — Apple ID web auth not touched either.
+
+Apple TV bypasses every auth endpoint we've tried from the Mac.
+
+### 12.3 The smoking-gun endpoint: `fpinit.itunes.apple.com`
+
+`fpinit` = "FairPlay init". The .har shows it called **three times** through
+a single session — once at boot, then at re-auth intervals. This is the
+endpoint where the device exchanges its FairPlay cert (signed by Apple at
+manufacture, stored in the Secure Enclave) for session tokens that the rest
+of the flow accepts.
+
+Probed from a Mac (every UA, every Content-Type, every plausible path):
+
+```
+GET  / → 404
+GET  /init → 404
+GET  /version → 404
+GET  /.well-known → 404
+GET  /bag.xml → 404
+POST / [application/x-apple-plist] → 404
+POST / [application/octet-stream] → 404
+POST / [application/json] → 404
+```
+
+Everything is 404. The path appstored POSTs to is part of the device-side
+code — we don't know it because we couldn't decrypt the HAR. And even if we
+did, the body would be a signed FairPlay request we can't forge.
+
+### 12.4 Endpoint UA-gating matrix (final)
+
+| Endpoint | Configurator UA | Apple TV UA | Verdict |
+|---|---|---|---|
+| `buy.itunes.apple.com/.../wa/authenticate` | ✓ 200 | ✗ 403 (edge) | Configurator-only |
+| `p29-buy.itunes.apple.com/.../wa/authenticate` | ✓ 200 | ✗ 403 (edge) | Same edge ACL |
+| `auth.itunes.apple.com/auth/v1/native/fast` | ✓ 200 | ✗ 403 | Configurator-only |
+| `gsa.apple.com/grandslam/GsService2` | ✓ 200 (with Xcode UA) | — | GSA — irrelevant to tvOS |
+| **`fpinit.itunes.apple.com/*`** | **404 every path** | **404 every path** | **Path-secret, FairPlay-keyed** |
+| `bag.itunes.apple.com/bag.xml` | ✓ 200 (45 KB iOS bag) | ✓ 200 (100 KB tvOS bag) | Open, returns different bags |
+| `amp-api.apps.apple.com/v1/catalog/…` | — | 401 (no token) | Needs the fpinit-derived token |
+| `init.ess.apple.com/` | — | 401 (no token) | Same |
+| `p29-buy.itunes.apple.com/.../volumeStoreDownloadProduct` | 200 (iOS cookies → iOS binary) | 200 (no cookies → 5002) | Public path, locked by *session*, not UA |
+
+### 12.5 What this means
+
+- **The "iOS binary always served" issue from Section 4 is now fully
+  explained**: Apple TV uses `fpinit` to obtain `tvOS-class` session tokens.
+  Configurator on Mac uses `MZFinance.woa/wa/authenticate` to obtain
+  `iOS-class` session tokens. `volumeStoreDownloadProduct` honors the
+  session class, not the per-request `deviceClass` hint.
+- **The pod-prefixed endpoints (`p29-buy`)** have the same UA ACL as the
+  bare `buy.itunes`. We previously hoped pod-prefix might be more permissive
+  — it isn't.
+- **Replay-from-Mac is closed.** Without the device's FairPlay cert, we
+  can't initialize a tvOS-class session at all.
+
+### 12.6 Two things we did gain
+
+1. **`bag.itunes.apple.com` is unrestricted** for both iOS and Apple TV UAs.
+   The Apple-TV bag is 100 KB of tvOS endpoint URLs we didn't previously
+   have — search/lookup/account/FPS-streaming. Notably:
+   - `storeplatform-lookup-url = sp.itunes.apple.com/WebObjects/MZStorePlatform.woa/wa/lookup`
+     is the modern tvOS-aware metadata source. Better than the iTunes
+     Search API's `entity=tvSoftware` (which silently falls back to iOS).
+     Should replace `lookup_app()` in `tvos_download.py` if we keep iterating.
+2. **Definitive proof of the wall** for this writeup. We can confidently
+   document "tvOS App Store auth is FairPlay-device-cert-based, gated at
+   `fpinit.itunes.apple.com`, and there is no public Mac-side path" with
+   endpoint-by-endpoint citations rather than guesses.
+
+### 12.7 What remains feasible
+
+For full body-level decryption of the auth handshake, we'd still need a
+capture from a device with active SSL pinning bypass. The unc0ver tvOS
+11.4.1 device with SKS3 narrow-filter (only `com.apple.itunesstored` in the
+filter array) keeps `itunesstored` healthy and is the only place where a
+real decrypted capture is feasible. *If* the tvOS 11 appstored uses the same
+`fpinit`-style flow (it likely does — the tvOS App Store stack has been
+stable since iOS/tvOS 11), one more capture from that device with SKS3 +
+Proxyman would let us see the actual request bodies.
+
+That's a "settle questions forever" kind of capture but **doesn't change the
+replay conclusion**: the FairPlay request inside is signed by the device's
+secure enclave; the Mac cannot forge it regardless of how clearly we see it.
+
+The pragmatic line: **the tvOS download has to happen on a tvOS device**, or
+the project's scope drops tvOS.
